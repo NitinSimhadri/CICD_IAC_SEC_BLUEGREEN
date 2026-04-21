@@ -1,0 +1,80 @@
+name: Full CI/CD Blue-Green
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Configure AWS
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
+
+    - name: Login to ECR
+      run: |
+        aws ecr get-login-password --region ap-south-1 | \
+        docker login --username AWS --password-stdin ${{ secrets.ECR_URL }}
+
+    - name: Build Image
+      run: docker build -t app ./app
+
+    - name: Tag Image
+      run: docker tag app:latest ${{ secrets.ECR_URL }}:latest
+
+    - name: Push Image
+      run: docker push ${{ secrets.ECR_URL }}:latest
+
+    - name: Get Current Target Group
+      id: tg
+      run: |
+        CURRENT=$(aws elbv2 describe-listeners \
+          --query "Listeners[0].DefaultActions[0].TargetGroupArn" \
+          --output text)
+
+        if [[ $CURRENT == *"blue"* ]]; then
+          echo "target=green" >> $GITHUB_OUTPUT
+        else
+          echo "target=blue" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Deploy to Target EC2 via SSM
+      run: |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ steps.tg.outputs.target }}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text)
+
+        aws ssm send-command \
+          --instance-ids $INSTANCE_ID \
+          --document-name "AWS-RunShellScript" \
+          --parameters commands="[
+            \"aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ${{ secrets.ECR_URL }}\",
+            \"docker pull ${{ secrets.ECR_URL }}:latest\",
+            \"docker stop app || true\",
+            \"docker rm app || true\",
+            \"docker run -d -p 8080:8080 --name app ${{ secrets.ECR_URL }}:latest\"
+          ]"
+
+    - name: Switch ALB Traffic
+      run: |
+        TG_ARN=$(aws elbv2 describe-target-groups \
+          --names ${{ steps.tg.outputs.target }}-tg \
+          --query "TargetGroups[0].TargetGroupArn" \
+          --output text)
+
+        LISTENER_ARN=$(aws elbv2 describe-listeners \
+          --query "Listeners[0].ListenerArn" \
+          --output text)
+
+        aws elbv2 modify-listener \
+          --listener-arn $LISTENER_ARN \
+          --default-actions Type=forward,TargetGroupArn=$TG_ARN
