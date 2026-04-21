@@ -1,4 +1,4 @@
-name: Full DevOps Pipeline (Blue-Green)
+name: CI/CD Pipeline - Blue Green Deployment
 
 on:
   push:
@@ -10,11 +10,11 @@ jobs:
 
     steps:
 
-    # ✅ Checkout
+    # ✅ 1. Checkout Code
     - name: Checkout Code
       uses: actions/checkout@v3
 
-    # ✅ AWS Login
+    # ✅ 2. Configure AWS Credentials
     - name: Configure AWS
       uses: aws-actions/configure-aws-credentials@v2
       with:
@@ -22,21 +22,21 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ap-south-1
 
-    # 🔥 SONARQUBE
+    # 🔥 3. SonarQube Scan
     - name: SonarQube Scan
       run: |
         cd app
         mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
         -Dsonar.projectKey=CICD_IAC_SEC_BLUEGREEN \
         -Dsonar.projectName='CICD_IAC_SEC_BLUEGREEN' \
-        -Dsonar.host.url=http://3.25.93.252:9000 \
+        -Dsonar.host.url=http://<YOUR-SONAR-IP>:9000 \
         -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
-    # 🔥 DOCKER BUILD
+    # 🔥 4. Build Docker Image
     - name: Build Docker Image
       run: docker build -t app ./app
 
-    # 🔥 INSTALL TRIVY (FIXED)
+    # 🔥 5. Install Trivy (stable way)
     - name: Install Trivy
       run: |
         sudo apt-get update
@@ -46,23 +46,23 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y trivy
 
-    # 🔥 TRIVY SCAN
+    # 🔥 6. Scan Docker Image
     - name: Trivy Scan
       run: trivy image app
 
-    # 🔥 LOGIN TO ECR
+    # 🔥 7. Login to AWS ECR
     - name: Login to ECR
       run: |
         aws ecr get-login-password --region ap-south-1 | \
         docker login --username AWS --password-stdin ${{ secrets.ECR_URL }}
 
-    # 🔥 PUSH IMAGE
+    # 🔥 8. Push Image to ECR
     - name: Push Image
       run: |
         docker tag app:latest ${{ secrets.ECR_URL }}:latest
         docker push ${{ secrets.ECR_URL }}:latest
 
-    # 🔥 DECIDE BLUE/GREEN
+    # 🔵🟢 9. Decide Blue/Green Target
     - name: Decide Deployment Target
       id: target
       run: |
@@ -77,7 +77,7 @@ jobs:
           echo "env=blue" >> $GITHUB_OUTPUT
         fi
 
-    # 🔥 DEPLOY TO EC2
+    # 🚀 10. Deploy to EC2 using SSM
     - name: Deploy via SSM
       run: |
         INSTANCE_ID=$(aws ec2 describe-instances \
@@ -96,12 +96,11 @@ jobs:
             \"docker run -d -p 8080:8080 --name app ${{ secrets.ECR_URL }}:latest\"
           ]"
 
-    # 🔥 SWITCH TRAFFIC
+    # 🔁 11. Switch ALB Traffic
     - name: Switch Traffic
       run: |
         TG_ARN=$(aws elbv2 describe-target-groups \
-          --names ${{ steps.target.outputs.env }}-tg \
-          --query "TargetGroups[0].TargetGroupArn" \
+          --query "TargetGroups[?contains(TargetGroupName, '${{ steps.target.outputs.env }}')].TargetGroupArn" \
           --output text)
 
         LISTENER_ARN=$(aws elbv2 describe-listeners \
