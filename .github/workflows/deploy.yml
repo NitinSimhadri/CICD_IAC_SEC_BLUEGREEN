@@ -14,7 +14,7 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v3
 
-    # ✅ AWS Setup
+    # ✅ AWS Login
     - name: Configure AWS
       uses: aws-actions/configure-aws-credentials@v2
       with:
@@ -32,27 +32,25 @@ jobs:
         -Dsonar.host.url=http://3.25.93.252:9000 \
         -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
-    # 🔥 BUILD DOCKER
+    # 🔥 DOCKER BUILD
     - name: Build Docker Image
       run: docker build -t app ./app
 
-    # 🔥 INSTALL TRIVY
+    # 🔥 INSTALL TRIVY (FIXED)
     - name: Install Trivy
       run: |
         sudo apt-get update
         sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-    
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
         echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-    
         sudo apt-get update
         sudo apt-get install -y trivy
 
-    # 🔥 SCAN IMAGE
+    # 🔥 TRIVY SCAN
     - name: Trivy Scan
       run: trivy image app
 
-    # 🔥 LOGIN ECR
+    # 🔥 LOGIN TO ECR
     - name: Login to ECR
       run: |
         aws ecr get-login-password --region ap-south-1 | \
@@ -64,11 +62,12 @@ jobs:
         docker tag app:latest ${{ secrets.ECR_URL }}:latest
         docker push ${{ secrets.ECR_URL }}:latest
 
-    # 🔥 DETERMINE TARGET (BLUE/GREEN)
+    # 🔥 DECIDE BLUE/GREEN
     - name: Decide Deployment Target
       id: target
       run: |
         CURRENT=$(aws elbv2 describe-listeners \
+          --load-balancer-arn ${{ secrets.ALB_ARN }} \
           --query "Listeners[0].DefaultActions[0].TargetGroupArn" \
           --output text)
 
@@ -78,7 +77,7 @@ jobs:
           echo "env=blue" >> $GITHUB_OUTPUT
         fi
 
-    # 🔥 DEPLOY TO TARGET EC2
+    # 🔥 DEPLOY TO EC2
     - name: Deploy via SSM
       run: |
         INSTANCE_ID=$(aws ec2 describe-instances \
@@ -106,6 +105,7 @@ jobs:
           --output text)
 
         LISTENER_ARN=$(aws elbv2 describe-listeners \
+          --load-balancer-arn ${{ secrets.ALB_ARN }} \
           --query "Listeners[0].ListenerArn" \
           --output text)
 
