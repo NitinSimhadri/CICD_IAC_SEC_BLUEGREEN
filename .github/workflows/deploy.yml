@@ -1,4 +1,4 @@
-name: Full CI/CD Blue-Green
+name: Full DevOps Pipeline
 
 on:
   push:
@@ -9,9 +9,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
+
+    # ✅ Checkout
+    - name: Checkout Code
       uses: actions/checkout@v3
 
+    # ✅ Configure AWS
     - name: Configure AWS
       uses: aws-actions/configure-aws-credentials@v2
       with:
@@ -19,37 +22,62 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ap-south-1
 
+    # 🔥 SONARQUBE SCAN
+    - name: SonarQube Scan
+      run: |
+        mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+        -Dsonar.projectKey=CICD_IAC_SEC_BLUEGREEN \
+        -Dsonar.projectName='CICD_IAC_SEC_BLUEGREEN' \
+        -Dsonar.host.url=http://3.25.93.252:9000 \
+        -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+    # 🔥 BUILD DOCKER IMAGE
+    - name: Build Docker Image
+      run: docker build -t app ./app
+
+    # 🔥 INSTALL TRIVY
+    - name: Install Trivy
+      run: |
+        sudo apt-get install wget -y
+        wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.50.1_Linux-64bit.deb
+        sudo dpkg -i trivy_0.50.1_Linux-64bit.deb
+
+    # 🔥 SCAN IMAGE
+    - name: Trivy Scan
+      run: |
+        trivy image app
+
+    # 🔥 LOGIN TO ECR
     - name: Login to ECR
       run: |
         aws ecr get-login-password --region ap-south-1 | \
         docker login --username AWS --password-stdin ${{ secrets.ECR_URL }}
 
-    - name: Build Image
-      run: docker build -t app ./app
-
-    - name: Tag Image
-      run: docker tag app:latest ${{ secrets.ECR_URL }}:latest
-
+    # 🔥 PUSH IMAGE
     - name: Push Image
-      run: docker push ${{ secrets.ECR_URL }}:latest
+      run: |
+        docker tag app:latest ${{ secrets.ECR_URL }}:latest
+        docker push ${{ secrets.ECR_URL }}:latest
 
-    - name: Get Current Target Group
-      id: tg
+    # 🔥 FIND TARGET (BLUE/GREEN)
+    - name: Decide Deployment Target
+      id: target
       run: |
         CURRENT=$(aws elbv2 describe-listeners \
           --query "Listeners[0].DefaultActions[0].TargetGroupArn" \
           --output text)
 
         if [[ $CURRENT == *"blue"* ]]; then
-          echo "target=green" >> $GITHUB_OUTPUT
+          echo "env=green" >> $GITHUB_OUTPUT
         else
-          echo "target=blue" >> $GITHUB_OUTPUT
+          echo "env=blue" >> $GITHUB_OUTPUT
         fi
 
-    - name: Deploy to Target EC2 via SSM
+    # 🔥 DEPLOY VIA SSM
+    - name: Deploy to EC2
       run: |
         INSTANCE_ID=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=${{ steps.tg.outputs.target }}*" \
+          --filters "Name=tag:Name,Values=${{ steps.target.outputs.env }}-instance" \
           --query "Reservations[*].Instances[*].InstanceId" \
           --output text)
 
@@ -64,10 +92,11 @@ jobs:
             \"docker run -d -p 8080:8080 --name app ${{ secrets.ECR_URL }}:latest\"
           ]"
 
-    - name: Switch ALB Traffic
+    # 🔥 SWITCH TRAFFIC
+    - name: Switch Traffic
       run: |
         TG_ARN=$(aws elbv2 describe-target-groups \
-          --names ${{ steps.tg.outputs.target }}-tg \
+          --names ${{ steps.target.outputs.env }}-tg \
           --query "TargetGroups[0].TargetGroupArn" \
           --output text)
 
