@@ -11,7 +11,7 @@ public class DemoApplication {
 
     @GetMapping("/")
     public String home() {
-        return "🚀 DevOps Blue-Green App Running!";
+        return "🚀 DevOps Blue-Green App Running!- POC14";
     }
 
     public static void main(String[] args) {
